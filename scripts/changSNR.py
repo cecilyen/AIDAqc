@@ -72,10 +72,12 @@ def kernel_density_estimation(data: np.ndarray,
         Density estimates at eval_points
     """
     n = len(data)
+    if n == 0:
+        return np.zeros_like(eval_points, dtype=np.float64)
     
-    # Sample data if too large for performance
+    # Sample data deterministically if too large for performance.
     if sample_size and n > sample_size:
-        indices = np.random.choice(n, sample_size, replace=False)
+        indices = np.linspace(0, n - 1, sample_size, dtype=np.int64)
         data_sampled = data[indices]
         n_effective = sample_size
     else:
@@ -84,6 +86,9 @@ def kernel_density_estimation(data: np.ndarray,
     
     # Vectorized KDE computation
     # Shape: (n_eval_points, n_data_points)
+    if bandwidth <= 0:
+        bandwidth = 1e-6
+
     diff = (eval_points[:, np.newaxis] - data_sampled[np.newaxis, :]) / bandwidth
     
     # Apply Gaussian kernel and sum

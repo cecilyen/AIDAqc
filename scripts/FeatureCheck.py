@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -12,90 +11,37 @@ import alive_progress as ap
 
 import pv_conv2Nifti as pr
 import pv_parser as par
+from file_naming import FEATURE_FILE_TEMPLATE, iter_address_files, sequence_type_from_name
 from QC import (
-    ResCalculator, GhostCheck, snrCalclualtor_chang, 
-    snrCalclualtor_normal, TsnrCalclualtor, Ismotion
+    ResCalculator, GhostCheck, snr_calculator_chang,
+    snr_calculator_normal, tsnr_calculator, Ismotion
 )
 
 
-# Constants
-SEQUENCE_TYPES = ['anat', 'diff', 'func']
-FEATURE_COLUMNS = {
-    'common': ['FileAddress', 'SpatRx', 'SpatRy', 'SpatRz', 'Ghosting'],
+METRIC_COLUMNS = {
     'anat': ['SNR Chang', 'SNR Normal'],
     'diff': ['SNR Chang', 'SNR Normal', 'Displacement factor (std of Mutual information)'],
-    'func': ['tSNR (Averaged Brain ROI)', 'Displacement factor (std of Mutual information)']
+    'func': ['tSNR (Averaged Brain ROI)', 'Displacement factor (std of Mutual information)'],
 }
 
 
-@dataclass
-class FeatureData:
-    """Container for calculated features."""
-    file_paths: List[str] = field(default_factory=list)
-    img_names: List[str] = field(default_factory=list)
-    sequence_names: List[str] = field(default_factory=list)
-    spatial_res: List[np.ndarray] = field(default_factory=list)
-    ghosting: List[float] = field(default_factory=list)
-    snr_chang: List[float] = field(default_factory=list)
-    snr_normal: List[float] = field(default_factory=list)
-    tsnr: List[float] = field(default_factory=list)
-    motion_info: List[float] = field(default_factory=list)
-    lmv: List[float] = field(default_factory=list)
-    gmv: List[float] = field(default_factory=list)
-    max_movement: List[float] = field(default_factory=list)
-    
-    def to_dataframe(self, seq_type: str) -> pd.DataFrame:
-        """Convert feature data to pandas DataFrame."""
-        df = pd.DataFrame({
-            'FileAddress': self.file_paths,
-            'SpatRx': [sr[0] for sr in self.spatial_res],
-            'SpatRy': [sr[1] for sr in self.spatial_res],
-            'SpatRz': [sr[2] for sr in self.spatial_res],
-            'Ghosting': self.ghosting
-        })
-        
-        # Add sequence-specific columns
-        if seq_type == 'anat':
-            if self.img_names:
-                df.insert(1, 'corresponding_img', self.img_names)
-            if self.sequence_names:
-                df.insert(1, 'sequence name', self.sequence_names)
-            df['SNR Chang'] = self.snr_chang
-            df['SNR Normal'] = self.snr_normal
-            
-        elif seq_type == 'diff':
-            if self.img_names:
-                df.insert(1, 'corresponding_img', self.img_names)
-            if self.sequence_names:
-                df.insert(1, 'sequence name', self.sequence_names)
-            df['SNR Chang'] = self.snr_chang
-            df['SNR Normal'] = self.snr_normal
-            df['Displacement factor (std of Mutual information)'] = self.lmv
-            
-        elif seq_type == 'func':
-            if self.img_names:
-                df.insert(1, 'corresponding_img', self.img_names)
-            if self.sequence_names:
-                df.insert(1, 'sequence name', self.sequence_names)
-            df['tSNR (Averaged Brain ROI)'] = self.tsnr
-            df['Displacement factor (std of Mutual information)'] = self.lmv
-        
-        return df
+def output_columns(seq_type: str, include_sequence_name: bool) -> List[str]:
+    """Return the CSV column order for one sequence type."""
+    metadata = ['FileAddress']
+    if include_sequence_name:
+        metadata.append('sequence name')
+    metadata.extend(['corresponding_img', 'SpatRx', 'SpatRy', 'SpatRz', 'Ghosting'])
+    return metadata + METRIC_COLUMNS[seq_type]
 
 
 def load_address_files(path: str) -> Dict[str, pd.DataFrame]:
     """Load address CSV files and return dictionary by sequence type."""
     address_book = {}
     
-    for file_path in Path(path).glob('*addreses*.csv'):
-        filename = file_path.name
-        
-        if 'anat' in filename:
-            address_book['anat'] = pd.read_csv(file_path)
-        elif 'diff' in filename:
-            address_book['diff'] = pd.read_csv(file_path)
-        elif 'func' in filename:
-            address_book['func'] = pd.read_csv(file_path)
+    for file_path in iter_address_files(path):
+        seq_type = sequence_type_from_name(file_path.name)
+        if seq_type and seq_type not in address_book:
+            address_book[seq_type] = pd.read_csv(file_path)
     
     return address_book
 
@@ -121,14 +67,14 @@ def calculate_common_features(input_file: nib.Nifti1Image) -> Tuple[np.ndarray, 
 
 def calculate_snr_features(input_file: nib.Nifti1Image) -> Tuple[float, float]:
     """Calculate SNR features for anatomical and diffusion sequences."""
-    snr_chang = snrCalclualtor_chang(input_file)
-    snr_normal = snrCalclualtor_normal(input_file)
+    snr_chang = snr_calculator_chang(input_file)
+    snr_normal = snr_calculator_normal(input_file)
     return snr_chang, snr_normal
 
 
-def calculate_motion_features(input_file: nib.Nifti1Image) -> Tuple[float, float, float, float]:
-    """Calculate motion-related features for functional and diffusion sequences."""
-    return Ismotion(input_file)
+def calculate_motion_displacement(input_file: nib.Nifti1Image) -> float:
+    """Return the motion displacement metric written to feature CSVs."""
+    return Ismotion(input_file)[3]
 
 
 def load_raw_bruker_data(file_path: str) -> Tuple[Optional[nib.Nifti1Image], Optional[str]]:
@@ -174,7 +120,7 @@ def process_single_file(file_path: str,
                        seq_type: str, 
                        output_path: str,
                        file_index: int,
-                       is_raw: bool = False) -> Tuple[Optional[Dict], Optional[str]]:
+                       is_raw: bool = False) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
     """
     Process a single file and extract features.
     
@@ -208,47 +154,35 @@ def process_single_file(file_path: str,
         # Calculate common features
         spatial_res, ghosting = calculate_common_features(input_file)
         
-        # Initialize feature dictionary
-        features = {
-            'file_path': file_path,
-            'img_name': full_img_name,
-            'sequence_key': sequence_key,
-            'spatial_res': spatial_res,
-            'ghosting': ghosting
+        row = {
+            'FileAddress': file_path,
+            'corresponding_img': full_img_name,
+            'SpatRx': spatial_res[0],
+            'SpatRy': spatial_res[1],
+            'SpatRz': spatial_res[2],
+            'Ghosting': ghosting,
         }
+        if sequence_key:
+            row['sequence name'] = sequence_key
         
         # Calculate sequence-specific features
         if seq_type == 'anat':
             snr_chang, snr_normal = calculate_snr_features(input_file)
-            features.update({
-                'snr_chang': snr_chang,
-                'snr_normal': snr_normal
-            })
+            row['SNR Chang'] = snr_chang
+            row['SNR Normal'] = snr_normal
             
         elif seq_type == 'diff':
             snr_chang, snr_normal = calculate_snr_features(input_file)
-            final, max_mov, gmv, lmv = calculate_motion_features(input_file)
-            features.update({
-                'snr_chang': snr_chang,
-                'snr_normal': snr_normal,
-                'motion_info': final,
-                'max_movement': max_mov,
-                'gmv': gmv,
-                'lmv': lmv
-            })
+            row['SNR Chang'] = snr_chang
+            row['SNR Normal'] = snr_normal
+            row['Displacement factor (std of Mutual information)'] = calculate_motion_displacement(input_file)
             
         elif seq_type == 'func':
-            tsnr = TsnrCalclualtor(input_file)
-            final, max_mov, gmv, lmv = calculate_motion_features(input_file)
-            features.update({
-                'tsnr': tsnr,
-                'motion_info': final,
-                'max_movement': max_mov,
-                'gmv': gmv,
-                'lmv': lmv
-            })
+            tsnr = tsnr_calculator(input_file)
+            row['tSNR (Averaged Brain ROI)'] = tsnr
+            row['Displacement factor (std of Mutual information)'] = calculate_motion_displacement(input_file)
         
-        return features, None
+        return row, None
         
     except (ValueError, SystemError, KeyError, FileNotFoundError, 
             nib.loadsave.ImageFileError) as e:
@@ -260,54 +194,39 @@ def process_single_file(file_path: str,
 def process_sequence_type(seq_type: str, 
                           file_list: List[str], 
                           output_path: str,
-                          is_raw: bool = False) -> Tuple[FeatureData, List[str]]:
+                          is_raw: bool = False) -> Tuple[List[Dict[str, object]], List[str]]:
     """Process all files of a given sequence type."""
     print(f'{seq_type} processing...\n')
     
-    feature_data = FeatureData()
+    rows = []
     error_list = []
     
     with ap.alive_bar(len(file_list), spinner='wait') as bar:
         for idx, file_path in enumerate(file_list, start=1):
-            features, error = process_single_file(
+            row, error = process_single_file(
                 str(file_path), seq_type, output_path, idx, is_raw
             )
             
             if error:
                 error_list.append(error)
-            elif features:
-                feature_data.file_paths.append(features['file_path'])
-                feature_data.img_names.append(features['img_name'])
-                feature_data.spatial_res.append(features['spatial_res'])
-                feature_data.ghosting.append(features['ghosting'])
-                
-                if features.get('sequence_key'):
-                    feature_data.sequence_names.append(features['sequence_key'])
-                
-                if 'snr_chang' in features:
-                    feature_data.snr_chang.append(features['snr_chang'])
-                    feature_data.snr_normal.append(features['snr_normal'])
-                
-                if 'tsnr' in features:
-                    feature_data.tsnr.append(features['tsnr'])
-                
-                if 'lmv' in features:
-                    feature_data.lmv.append(features['lmv'])
-                    feature_data.gmv.append(features['gmv'])
-                    feature_data.motion_info.append(features['motion_info'])
-                    feature_data.max_movement.append(features['max_movement'])
+            elif row:
+                rows.append(row)
             
             bar()
     
-    return feature_data, error_list
+    return rows, error_list
 
 
-def save_results(feature_data: FeatureData, 
+def save_results(rows: List[Dict[str, object]],
                 seq_type: str, 
                 output_path: str) -> None:
-    """Save feature data to CSV file."""
-    df = feature_data.to_dataframe(seq_type)
-    output_file = os.path.join(output_path, f"caculated_features_{seq_type}.csv")
+    """Save feature rows to a CSV file."""
+    include_sequence_name = any('sequence name' in row for row in rows)
+    df = pd.DataFrame(rows, columns=output_columns(seq_type, include_sequence_name))
+    output_file = os.path.join(
+        output_path,
+        FEATURE_FILE_TEMPLATE.format(seq_type=seq_type),
+    )
     df.to_csv(output_file, index=False)
 
 
@@ -336,13 +255,13 @@ def process_features(path: str, is_raw: bool = False) -> None:
         file_list = addresses_df.iloc[:, 0].tolist()
         
         # Process files
-        feature_data, errors = process_sequence_type(
+        rows, errors = process_sequence_type(
             seq_type, file_list, path, is_raw
         )
         
         # Save results
-        if feature_data.file_paths:
-            save_results(feature_data, seq_type, path)
+        if rows:
+            save_results(rows, seq_type, path)
         
         all_errors.extend(errors)
         

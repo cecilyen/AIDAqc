@@ -6,7 +6,7 @@
 <br/>
 <h3>Features</h3> 
 
-- **Input:** Bruker raw data or NIFTY (T2-weighted MRI, diffusion-weighted MRI, or DTI, and rs-fMRI)
+- **Input:** Bruker raw data or NIfTI (T2-weighted MRI, diffusion-weighted MRI, or DTI, and rs-fMRI)
 - **Calculations:** SNR, tSNR, movement variability, data quality categorization (finds bad quality outliers)
 - **Output Format:** CSV sheets, PDFs, & images
 
@@ -18,7 +18,7 @@
 [**See the poster for all details**](https://github.com/Aswendt-Lab/AIDAqc/blob/main/docs/AIDAqc_Poster_Summary.pdf) 
 
 <h3>Installation</h3> 
-Download the repository => Install Python 3.6 (Anaconda) => Import AIDAqc conda environment aidaqc.yaml
+Download the repository, install Python 3.6 with Conda, then import the AIDAqc Conda environment from `aidaqc.yaml`.
 
 Main function: *ParsingData*
 
@@ -26,19 +26,19 @@ See the full manual [here](https://github.com/Aswendt-Lab/AIDAqc/blob/main/docs/
 
 <h3>Docker/Apptainer Usage</h3>
 
-```{bash}
-#Build
+```bash
+# Build
 
-docker build aidaqc:2.1 .
+docker build -t aidaqc:2.1 .
 
 # Running the main ParsingData.py:
 
-docker run -v /your/project/data:/data -v /your/project/qc aidaqc:2.1 -i /data -o /qc -f raw
+docker run --rm -v /your/project/data:/data -v /your/project/qc:/qc aidaqc:2.1 -i /data -o /qc -f raw
 
 ```
 
 For installation in a [apptainer](https://apptainer.org/) container for GNU/Linux:
-```{bash}
+```bash
 # Download the repository
 git clone https://github.com/Aswendt-Lab/AIDAqc.git
 cd AIDAqc

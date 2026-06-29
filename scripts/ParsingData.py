@@ -9,9 +9,8 @@ and eliminiate the duplicates.
 """
 
 import os
-import glob
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import argparse
 
 import pandas as pd
@@ -19,6 +18,12 @@ import alive_progress as ap
 import pv_parser as par
 import QC
 import FeatureCheck as fc
+from file_naming import (
+    ADDRESS_FILE_TEMPLATE,
+    SEQUENCE_TYPES,
+    iter_address_files,
+    iter_feature_files,
+)
 
 
 # Constants
@@ -26,7 +31,7 @@ DTI_KEYWORDS = ["DTI", "STRUCT", "DWI", "DIFFUS"]
 FMRI_KEYWORDS = ["RESTING", "FUN", "RSF", "FMRI", "BOLD", "RS-"]
 T2_KEYWORDS = ["T2W", "T1W", "ANAT", "RARE", "TURBO", "T1_F", "T2_F"]
 NOT_ALLOWED = ["LOC", "PIL", "FISP", "WOB", "NOIS", "SINGL", "MRS", "B0M", "FIELD"]
-TYPE_STRINGS = ['diff', 'func', 'anat']
+TYPE_STRINGS = list(SEQUENCE_TYPES)
 
 
 def print_header():
@@ -60,13 +65,8 @@ def check_keywords(text: str, keywords: List[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
-def classify_sequence_type(key: str, param_data: Dict) -> Tuple[str, bool]:
-    """
-    Classify the sequence type based on keywords.
-    
-    Returns:
-        Tuple of (sequence_type, is_allowed)
-    """
+def classify_sequence_type(key: str, param_data: Dict) -> Optional[str]:
+    """Classify a raw Bruker sequence from acquisition keywords."""
     flag_anat = check_keywords(key, T2_KEYWORDS)
     flag_struct = check_keywords(key, DTI_KEYWORDS)
     flag_func = check_keywords(key, FMRI_KEYWORDS)
@@ -74,37 +74,56 @@ def classify_sequence_type(key: str, param_data: Dict) -> Tuple[str, bool]:
     flag_epi = "EPI" in key
     
     if flag_not_allowed:
-        return None, False
+        return None
     
     if flag_struct:
-        return "diff", True
+        return "diff"
     elif flag_func:
-        return "func", True
+        return "func"
     elif flag_anat and not flag_epi:
-        return "anat", True
+        return "anat"
     elif flag_epi:
         # Additional check for EPI sequences
         time_points = param_data.get("ACQ_time_points", [])
         movie_frames = param_data.get("ACQ_n_movie_frames", 0)
         if movie_frames != len(time_points):
-            return "func", True
+            return "func"
         else:
-            return "diff", True
+            return "diff"
     
-    return None, False
+    return None
 
 
-def parse_raw_files(initial_path: str) -> Tuple[List[str], int]:
+def classify_nifti_path(file_path: str) -> Optional[str]:
+    """Classify a NIfTI file from filename or parent-folder keywords."""
+    for part in reversed(Path(file_path).parts):
+        part_upper = part.upper()
+
+        if check_keywords(part_upper, NOT_ALLOWED):
+            return None
+        if check_keywords(part_upper, DTI_KEYWORDS):
+            return "diff"
+        if check_keywords(part_upper, FMRI_KEYWORDS):
+            return "func"
+        if check_keywords(part_upper, T2_KEYWORDS):
+            return "anat"
+
+    return None
+
+
+def parse_raw_files(initial_path: str) -> List[str]:
     """Parse raw MR files and return list of acqp files."""
-    path_pattern = os.path.join(initial_path, "**", "acqp")
-    
     with ap.alive_bar(title='Parsing through folders...', length=10, 
                       stats=False, monitor=False) as bar:
-        text_files = glob.glob(path_pattern, recursive=True)
+        text_files = [
+            str(path)
+            for path in Path(initial_path).rglob("acqp")
+            if path.is_file()
+        ]
         bar()
     
     print(f'TOTAL NUMBER OF {len(text_files)} FILES WERE FOUND: PARSING FINISHED!')
-    return text_files, len(text_files)
+    return text_files
 
 
 def extract_raw_sequences(text_files: List[str]) -> Tuple[Dict[str, List[str]], List[str]]:
@@ -137,9 +156,9 @@ def extract_raw_sequences(text_files: List[str]) -> Tuple[Dict[str, List[str]], 
                 bar()
                 continue
             
-            seq_type, is_allowed = classify_sequence_type(key, param_data)
+            seq_type = classify_sequence_type(key, param_data)
             
-            if seq_type and is_allowed:
+            if seq_type:
                 address_book[seq_type].append(os.path.dirname(filepath))
                 count += 1
             
@@ -155,16 +174,14 @@ def extract_raw_sequences(text_files: List[str]) -> Tuple[Dict[str, List[str]], 
 
 def parse_nifti_files(initial_path: str, suffix: str) -> List[str]:
     """Parse NIfTI files and return list of file paths."""
-    patterns = [
-        os.path.join(initial_path, "**", f"*{suffix}.nii.gz"),
-        os.path.join(initial_path, "**", f"*{suffix}.nii")
-    ]
-    
+    patterns = (f"*{suffix}.nii.gz", f"*{suffix}.nii")
+    base_path = Path(initial_path)
+
     with ap.alive_bar(title='Parsing through folders...', length=10,
                       stats=False, monitor=False) as bar:
         text_files = []
         for pattern in patterns:
-            text_files.extend(glob.glob(pattern, recursive=True))
+            text_files.extend(str(path) for path in base_path.rglob(pattern) if path.is_file())
         bar()
     
     print(f'TOTAL NUMBER OF {len(text_files)} FILES WERE FOUND: PARSING FINISHED!')
@@ -176,32 +193,7 @@ def extract_nifti_sequences(text_files: List[str]) -> Dict[str, List[str]]:
     address_book = initialize_address_book()
     
     for filepath in text_files:
-        path_parts = filepath.split(os.sep)
-        
-        # Check path components from filename backwards
-        seq_type = None
-        for idx in range(len(path_parts)):
-            part_upper = path_parts[-idx - 1].upper()
-            
-            flag_anat = check_keywords(part_upper, T2_KEYWORDS)
-            flag_struct = check_keywords(part_upper, DTI_KEYWORDS)
-            flag_func = check_keywords(part_upper, FMRI_KEYWORDS)
-            flag_not_allowed = check_keywords(part_upper, NOT_ALLOWED)
-            
-            if any([flag_anat, flag_struct, flag_func, flag_not_allowed]):
-                break
-        
-        # Determine sequence type
-        if flag_not_allowed:
-            continue
-        
-        if flag_struct:
-            seq_type = "diff"
-        elif flag_func:
-            seq_type = "func"
-        elif flag_anat:
-            seq_type = "anat"
-        
+        seq_type = classify_nifti_path(filepath)
         if seq_type:
             address_book[seq_type].append(filepath)
     
@@ -215,7 +207,10 @@ def save_address_book(address_book: Dict[str, List[str]],
     for type_str, addresses in address_book.items():
         if addresses:
             df = pd.DataFrame(addresses, columns=[0])
-            filename = f"{format_type}_data_addreses_{type_str}.csv"
+            filename = ADDRESS_FILE_TEMPLATE.format(
+                format_type=format_type,
+                seq_type=type_str,
+            )
             filepath = os.path.join(saving_path, filename)
             df.to_csv(filepath, sep=',', index=False)
 
@@ -232,16 +227,15 @@ def save_error_list(error_list: List[str], saving_path: str):
 def cleanup_and_organize(saving_path: str):
     """Clean up temporary files and organize results."""
     # Remove address files
-    for file in glob.glob(os.path.join(saving_path, '*data_addreses*.csv')):
+    for file in iter_address_files(saving_path):
         os.remove(file)
     
     # Create and move calculated features
     features_dir = os.path.join(saving_path, "calculated_features")
     os.makedirs(features_dir, exist_ok=True)
     
-    for old_file in glob.glob(os.path.join(saving_path, '*caculated_features*.csv')):
-        filename = os.path.basename(old_file)
-        new_file = os.path.join(features_dir, filename)
+    for old_file in iter_feature_files(saving_path):
+        new_file = os.path.join(features_dir, old_file.name)
         os.replace(old_file, new_file)
 
 
@@ -284,7 +278,7 @@ def main():
     
     # Parse files based on format
     if args.format_type == "raw":
-        text_files, _ = parse_raw_files(args.initial_path)
+        text_files = parse_raw_files(args.initial_path)
         address_book, error_list = extract_raw_sequences(text_files)
         save_error_list(error_list, args.output_path)
     else:  # nifti

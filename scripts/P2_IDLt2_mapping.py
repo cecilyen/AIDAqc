@@ -8,7 +8,7 @@ University Hospital Cologne
 
 """
 import os
-from math import *
+import sys
 from lmfit import  Minimizer, Parameters
 import matplotlib.pyplot as plt
 import nibabel as nii

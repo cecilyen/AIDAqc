@@ -10,6 +10,23 @@
 - **Calculations:** SNR, tSNR, movement variability, data quality categorization (finds bad quality outliers)
 - **Output Format:** CSV sheets, PDFs, & images
 
+<h3>Changes in this fork</h3>
+
+This branch is based on the original [Aswendt-Lab/AIDAqc](https://github.com/Aswendt-Lab/AIDAqc) project and keeps the same main entry point, `scripts/ParsingData.py`, and the same high-level workflow: discover scans, classify sequences, calculate QC features, and generate summary outputs.
+
+Compared with the original upstream repository, this fork changes the implementation in these areas:
+
+- **Simpler pipeline code:** feature extraction now builds one output row per scan directly instead of maintaining parallel accumulator lists.
+- **Centralized output naming:** generated address and feature CSV filename conventions are shared in `scripts/file_naming.py`.
+- **Backward-compatible file reads:** legacy misspelled outputs such as `data_addreses` and `caculated_features` are still recognized, while new files use `data_addresses` and `calculated_features`.
+- **QC robustness:** QC table generation uses explicit model columns, an explicit 1.5*IQR outlier rule, numeric guards for empty or degenerate images, and a corrected output path column named `Paths`.
+- **Performance and reproducibility:** mutual-information calculations and SNR code are more vectorized, and the Chang SNR sampling path is deterministic for repeatable runs.
+- **Python 3 cleanup:** old wildcard imports, brittle type-string checks, and Python 2-era dictionary-to-XML logic were simplified while preserving existing public helper names.
+- **Container and docs cleanup:** the Dockerfile now uses a single Conda-based stage, fixes the Conda environment path, and the README Docker commands use valid build and volume syntax.
+- **Dependency list cleanup:** `requirements.txt` removes unused/commented entries from the original list and adds the local `dict2xml` dependency used by Bruker metadata parsing.
+
+Validation performed for this fork has covered Python syntax/compile checks and a lightweight XML helper smoke test. Full MRI dataset validation and container image builds have not yet been rerun on this branch.
+
 <img align="left" src="https://github.com/Aswendt-Lab/AIDAqc/blob/main/docs/AIDAqc_workflow.png">
 
 <br/>

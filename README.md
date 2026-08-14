@@ -24,8 +24,9 @@ Compared with the original upstream repository, this fork changes the implementa
 - **Python 3 cleanup:** old wildcard imports, brittle type-string checks, and Python 2-era dictionary-to-XML logic were simplified while preserving existing public helper names.
 - **Container and docs cleanup:** the Dockerfile now uses a single Conda-based stage, fixes the Conda environment path, and the README Docker commands use valid build and volume syntax.
 - **Dependency list cleanup:** `requirements.txt` removes unused/commented entries from the original list and adds the local `dict2xml` dependency used by Bruker metadata parsing.
+- **Follow-up cleanup:** the feature path now shares sequence-specific metric logic, address CSVs use an explicit `FileAddress` column, raw/NIfTI I/O uses safer `Path` handling, SNR/KDE helpers bound their working set, and Bruker diffusion tables are written with consistent rows and columns.
 
-Validation performed for this fork has covered Python syntax/compile checks and a lightweight XML helper smoke test. Full MRI dataset validation and container image builds have not yet been rerun on this branch.
+Validation performed for this fork has covered Python 3.6 grammar/compile checks and lightweight XML helper smoke tests. Full MRI dataset validation and container image builds have not yet been rerun; the isolated validation runtime also does not include the scientific dependencies required for the full pipeline.
 
 <img align="left" src="https://github.com/Aswendt-Lab/AIDAqc/blob/main/docs/AIDAqc_workflow.png">
 

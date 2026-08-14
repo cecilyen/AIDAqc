@@ -8,8 +8,6 @@ Max Planck Institute for Metabolism Research, Cologne
 Read Bruker ParaVision JCAMP parameter files (e.g. acqp, method, visu_pars).
 '''
 
-from __future__ import print_function
-
 VERSION = 'pv_parser.py v 1.0.2 20200820'
 
 import re
@@ -327,20 +325,16 @@ def read_param_file(filename):
         result = [] if result is None else list(result.groups())
 
         # Checking if label present and removing proprietary tag
-        try:
+        if result:
             label = result[0]
-        except:
-            label = None
-        else:
             if label.startswith('$'):
                 label = label[1:]
             #print("label:%d:%s:" % (len(label), label))
+        else:
+            label = None
 
         # Checking if value present otherwise value is set to empty string
-        try:
-            value = result[1]
-        except:
-            value = ''
+        value = result[1] if len(result) > 1 else ''
         #print("value:%d:%s:" % (len(value), value))
 
         flag_comment = True if '$$' in line else False

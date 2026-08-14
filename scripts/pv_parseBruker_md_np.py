@@ -8,9 +8,8 @@ University Hospital Cologne
 
 """
 
-from __future__ import print_function
-
-import os,sys
+import os
+import sys
 
 import numpy as np
 
@@ -31,9 +30,8 @@ def parsePV(filename):
         return []
 
     # Read file 'filename' -> list 'lines'
-    f = open(filename, 'r')
-    lines = f.readlines()
-    f.close()
+    with open(filename, 'r') as f:
+        lines = f.readlines()
 
     # Dictionary for parameters
     params = {}
@@ -142,9 +140,8 @@ def getXML(filename, writeFile=False):
     xml = createXML(header, '<?xml version="1.0"?>\n')
 
     if writeFile:
-        f = open('scaninfo.xml', 'w')
-        f.write(xml)
-        f.close()
+        with open('scaninfo.xml', 'w') as f:
+            f.write(xml)
     else:
         return xml
 
@@ -317,20 +314,20 @@ def getRotMatrix(filename):
     sc : scales pixel dimension (defaults to 10 for animal imaging)
     """
     params = parsePV(filename)
-    orientation = map(float, params['VisuCoreOrientation'].split())
-    if not 'VisuCorePosition' in params:
+    orientation = np.fromstring(params['VisuCoreOrientation'], sep=' ')
+    if 'VisuCorePosition' not in params:
         return np.array([0.0, 0.0, 0.0, 0.0])
-    position    = map(float, params['VisuCorePosition'].split())
-    orientation = np.array(orientation[0:9]).reshape((3, 3))
-    position    = np.array(position[0:3]).reshape((3, 1))
-    rotMatrix   = np.append(orientation, position, axis=1)
-    rotMatrix   = np.append(rotMatrix, np.array([0.0, 0.0, 0.0, 1.0]).reshape(1, 4), axis=0)
-    return rotMatrix
+    position = np.fromstring(params['VisuCorePosition'], sep=' ')
+    if orientation.size < 9 or position.size < 3:
+        raise ValueError("Bruker orientation or position data is incomplete")
+    rotation = orientation[:9].reshape((3, 3))
+    translation = position[:3].reshape((3, 1))
+    matrix = np.append(rotation, translation, axis=1)
+    return np.append(matrix, np.array([[0.0, 0.0, 0.0, 1.0]]), axis=0)
 
 def writeRotMatrix(rotMatrix, filename):
-    fid = open(filename, 'w')
-    np.savetxt(fid, rotMatrix, fmt='%-7.2f')
-    fid.close()
+    with open(filename, 'w') as fid:
+        np.savetxt(fid, rotMatrix, fmt='%-7.2f')
 
 """
 if __name__ == '__main__':

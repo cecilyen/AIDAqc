@@ -8,10 +8,10 @@ looking for MR data files of any type. Then it will extract the wanted files
 and eliminiate the duplicates.
 """
 
+import argparse
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import argparse
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import alive_progress as ap
@@ -31,7 +31,7 @@ DTI_KEYWORDS = ["DTI", "STRUCT", "DWI", "DIFFUS"]
 FMRI_KEYWORDS = ["RESTING", "FUN", "RSF", "FMRI", "BOLD", "RS-"]
 T2_KEYWORDS = ["T2W", "T1W", "ANAT", "RARE", "TURBO", "T1_F", "T2_F"]
 NOT_ALLOWED = ["LOC", "PIL", "FISP", "WOB", "NOIS", "SINGL", "MRS", "B0M", "FIELD"]
-TYPE_STRINGS = list(SEQUENCE_TYPES)
+TYPE_STRINGS = SEQUENCE_TYPES
 
 
 def print_header():
@@ -60,7 +60,7 @@ def initialize_address_book() -> Dict[str, List[str]]:
     return {type_str: [] for type_str in TYPE_STRINGS}
 
 
-def check_keywords(text: str, keywords: List[str]) -> bool:
+def check_keywords(text: str, keywords: Sequence[str]) -> bool:
     """Check if any keyword is present in the text."""
     return any(keyword in text for keyword in keywords)
 
@@ -206,7 +206,7 @@ def save_address_book(address_book: Dict[str, List[str]],
     """Save address book to CSV files."""
     for type_str, addresses in address_book.items():
         if addresses:
-            df = pd.DataFrame(addresses, columns=[0])
+            df = pd.DataFrame(addresses, columns=["FileAddress"])
             filename = ADDRESS_FILE_TEMPLATE.format(
                 format_type=format_type,
                 seq_type=type_str,
@@ -226,17 +226,18 @@ def save_error_list(error_list: List[str], saving_path: str):
 
 def cleanup_and_organize(saving_path: str):
     """Clean up temporary files and organize results."""
+    output_path = Path(saving_path)
+
     # Remove address files
-    for file in iter_address_files(saving_path):
-        os.remove(file)
+    for file_path in iter_address_files(output_path):
+        file_path.unlink()
     
     # Create and move calculated features
-    features_dir = os.path.join(saving_path, "calculated_features")
-    os.makedirs(features_dir, exist_ok=True)
+    features_dir = output_path / "calculated_features"
+    features_dir.mkdir(exist_ok=True)
     
-    for old_file in iter_feature_files(saving_path):
-        new_file = os.path.join(features_dir, old_file.name)
-        os.replace(old_file, new_file)
+    for old_file in iter_feature_files(output_path):
+        old_file.replace(features_dir / old_file.name)
 
 
 def parse_arguments():
@@ -272,7 +273,6 @@ def main():
         NOT_ALLOWED.extend([e.upper() for e in args.exclude])
     
     # Setup
-    QC.tic()
     print_header()
     os.makedirs(args.output_path, exist_ok=True)
     
@@ -299,8 +299,6 @@ def main():
         fc.CheckingRawFeatures(args.output_path)
     else:
         fc.CheckingNiftiFeatures(args.output_path)
-    
-    QC.toc()
     
     # Plotting and cleanup
     print('PLOTTING QUALITY FEATURES...\n')

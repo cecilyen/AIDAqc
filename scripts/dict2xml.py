@@ -1,5 +1,7 @@
 """Minimal dictionary-to-XML helper used by the Bruker metadata parser."""
 
+from xml.sax.saxutils import escape
+
 __author__ = "Pianfetti Maurizio <boymix81@gmail.com>"
 __contributors__ = []
 __date__ = "$Date: 2007/12/15 11:57:20  $"
@@ -26,7 +28,8 @@ def render_mapping(mapping, level=0):
             else:
                 xml.append("%s<%s></%s>\n" % (indent, key, key))
         else:
-            xml.append("%s<%s>%s</%s>\n" % (indent, key, value, key))
+            text = "" if value is None else escape(str(value))
+            xml.append("%s<%s>%s</%s>\n" % (indent, key, text, key))
 
     return "".join(xml)
 

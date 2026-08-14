@@ -13,9 +13,6 @@ from typing import Tuple, Optional
 from scipy import stats
 
 
-np.seterr(divide='ignore', invalid='ignore')
-
-
 def gaussian_kernel(x: np.ndarray) -> np.ndarray:
     """
     Gaussian kernel function for kernel density estimation.
@@ -41,7 +38,12 @@ def estimate_noise_std_histogram(img_normalized: np.ndarray,
     Returns:
         Estimated standard deviation (normalized)
     """
-    bin_counts, bin_edges = np.histogram(img_normalized, bins=n_bins)
+    values = np.asarray(img_normalized, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+
+    bin_counts, bin_edges = np.histogram(values, bins=max(1, int(n_bins)))
     
     if bin_counts.max() == 0:
         return 0.0
@@ -86,7 +88,7 @@ def kernel_density_estimation(data: np.ndarray,
     
     # Vectorized KDE computation
     # Shape: (n_eval_points, n_data_points)
-    if bandwidth <= 0:
+    if not np.isfinite(bandwidth) or bandwidth <= 0:
         bandwidth = 1e-6
 
     diff = (eval_points[:, np.newaxis] - data_sampled[np.newaxis, :]) / bandwidth
@@ -114,19 +116,26 @@ def calculate_snr_chang(img: np.ndarray,
     Returns:
         Tuple of (snr_map, estimated_std, estimated_std_normalized)
     """
-    # Normalize image to [0, 1]
-    img_float = img.astype(np.float64)
+    # Normalize finite image data to [0, 1].
+    img_float = np.asarray(img, dtype=np.float64)
+    if img_float.size == 0:
+        return np.zeros_like(img_float), 0.0, 0.0
+    finite = np.isfinite(img_float)
+    if not finite.any():
+        return np.zeros_like(img_float), 0.0, 0.0
+    img_float = np.nan_to_num(img_float, nan=0.0, posinf=0.0, neginf=0.0)
     img_max = img_float.max()
     
-    if img_max == 0:
-        return np.zeros_like(img), 0.0, 0.0
+    if img_max <= 0:
+        return np.zeros_like(img_float), 0.0, 0.0
     
     img_flat = img_float.ravel()
     img_normalized = img_flat / img_max
     
     # Calculate number of bins using Sturges' rule (improved)
     n_pixels = img_normalized.size
-    n_bins = int(np.ceil(np.sqrt(n_pixels)) * histogram_factor)
+    n_bins = int(np.ceil(np.sqrt(n_pixels)) * max(histogram_factor, 1e-6))
+    n_bins = max(32, min(512, n_bins))
     
     # Initial noise estimate from histogram
     initial_std = estimate_noise_std_histogram(img_normalized, n_bins)
@@ -155,8 +164,10 @@ def calculate_snr_chang(img: np.ndarray,
     # Note: Division by 10 is from original implementation
     estimated_std = estimated_std_normalized * img_max / 10
     
-    # Calculate SNR map
-    # SNR = sqrt(|S^2 - σ^2|) / σ
+    if estimated_std <= 0 or not np.isfinite(estimated_std):
+        return np.zeros_like(img_float), estimated_std, estimated_std_normalized
+
+    # Calculate SNR map: sqrt(|S^2 - sigma^2|) / sigma.
     signal_squared = img_float**2
     noise_squared = estimated_std**2
     
@@ -213,16 +224,25 @@ def calculate_snr_scipy(img: np.ndarray,
     Returns:
         Tuple of (snr_map, estimated_std, estimated_std_normalized)
     """
-    img_float = img.astype(np.float64)
+    img_float = np.asarray(img, dtype=np.float64)
+    if img_float.size == 0:
+        return np.zeros_like(img_float), 0.0, 0.0
+    img_float = np.nan_to_num(img_float, nan=0.0, posinf=0.0, neginf=0.0)
     img_max = img_float.max()
     
-    if img_max == 0:
-        return np.zeros_like(img), 0.0, 0.0
+    if img_max <= 0:
+        return np.zeros_like(img_float), 0.0, 0.0
     
     img_normalized = (img_float / img_max).ravel()
     
-    # Use scipy's gaussian_kde (Scott's rule for bandwidth)
-    kde = stats.gaussian_kde(img_normalized, bw_method='scott')
+    # Use scipy's gaussian_kde (Scott's rule for bandwidth). Constant data
+    # cannot define a KDE, so use the deterministic histogram implementation.
+    if img_normalized.size < 2 or np.unique(img_normalized).size < 2:
+        return calculate_snr_chang(img, show_plot=show_plot)
+    try:
+        kde = stats.gaussian_kde(img_normalized, bw_method='scott')
+    except (np.linalg.LinAlgError, ValueError):
+        return calculate_snr_chang(img, show_plot=show_plot)
     
     # Evaluate density
     eval_points = np.linspace(0, 1, 1000)
@@ -233,6 +253,9 @@ def calculate_snr_scipy(img: np.ndarray,
     estimated_std_normalized = eval_points[max_density_idx]
     estimated_std = estimated_std_normalized * img_max / 10
     
+    if estimated_std <= 0 or not np.isfinite(estimated_std):
+        return np.zeros_like(img_float), estimated_std, estimated_std_normalized
+
     # Calculate SNR map
     snr_map = np.sqrt(np.abs(img_float**2 - estimated_std**2)) / estimated_std
     snr_map = np.nan_to_num(snr_map, nan=0.0, posinf=0.0, neginf=0.0)

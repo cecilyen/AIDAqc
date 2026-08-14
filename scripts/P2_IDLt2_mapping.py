@@ -7,19 +7,16 @@ Department of Neurology
 University Hospital Cologne
 
 """
-import os
 import sys
-from lmfit import  Minimizer, Parameters
-import matplotlib.pyplot as plt
+from pathlib import Path
+
+from lmfit import Minimizer, Parameters
 import nibabel as nii
 import numpy as np
 import progressbar
 
 
 #from ReferenceMethods import brummerSNR, changSNR, sijbersSNR
-
-plt.interactive(False)
-
 
 def t2_monoexp3 (params, t, data):
     """
@@ -244,6 +241,9 @@ def mpfitfun(data,te,model,uplim):
         minner = Minimizer(t2_monoexp3, params, fcn_args=(x, y))
         result = minner.minimize()
 
+    else:
+        raise ValueError("Unknown T2 model: %s" % model)
+
     return result.params
 
 def parsePV(filename):
@@ -252,9 +252,8 @@ def parsePV(filename):
     """
 
     # Read file 'filename' -> list 'lines'
-    f = open(filename, 'r')
-    lines = f.readlines()
-    f.close()
+    with open(filename, 'r') as f:
+        lines = f.readlines()
 
     # Dictionary for parameters
     params = {}
@@ -303,11 +302,11 @@ def parsePV(filename):
                 params[key].append(dataset)
 
     # Remove specific elements from parameter dictionary
-    if '$VisuCoreDataMin' in params: del params['$VisuCoreDataMin']
-    if '$VisuCoreDataMax' in params: del params['$VisuCoreDataMax']
-    if '$VisuCoreDataOffs' in params: del params['$VisuCoreDataOffs']
-    if '$VisuCoreDataSlope' in params: del params['$VisuCoreDataSlope']
-    if '$VisuAcqImagePhaseEncDir' in params: del params['$VisuAcqImagePhaseEncDir']
+    for key in (
+        '$VisuCoreDataMin', '$VisuCoreDataMax', '$VisuCoreDataOffs',
+        '$VisuCoreDataSlope', '$VisuAcqImagePhaseEncDir',
+    ):
+        params.pop(key, None)
 
     for key in params.keys():
         pardim = params[key][0]
@@ -324,9 +323,7 @@ def parsePV(filename):
 def getT2mapping(path,model,upLim,snrLim,SNRMethod,echoTime):
 
     data = nii.load(path)
-    hdr = data.header
-    raw = hdr.structarr
-    if raw['dim'][3] < 2:
+    if data.ndim < 4 or data.shape[3] < 2:
         sys.exit("Error: '%s' has wrong dimensions." % (path,))
 
     print('Start to  fit '+model+'-Map over TE %s ...' % (echoTime,) )
@@ -334,14 +331,21 @@ def getT2mapping(path,model,upLim,snrLim,SNRMethod,echoTime):
 
 
 
-    map = t2_mapping(data, echoTime, model=model, uplim=upLim, snrLim=snrLim, SNRMethod=SNRMethod)
-    pathT2Map = os.path.split(path)[0]
-    map = map[:, :, :, 0] #delete this line if you want more outputdata
-    mapNii =  nii.as_closest_canonical(nii.Nifti1Image(map, data.affine))
-    hdr = mapNii.header
-    hdr.set_xyzt_units('mm')
-    study = os.path.split(path)[1].split('.')[0]
-    nii.save(mapNii, os.path.join(pathT2Map, (study+'T2Map'+model+'.nii.gz')))
+    t2_map = t2_mapping(
+        data, echoTime, model=model, uplim=upLim,
+        snrLim=snrLim, SNRMethod=SNRMethod
+    )
+    t2_map = t2_map[:, :, :, 0]
+    map_image = nii.as_closest_canonical(nii.Nifti1Image(t2_map, data.affine))
+    map_image.header.set_xyzt_units('mm')
+    input_name = Path(path).name
+    for suffix in ('.nii.gz', '.nii'):
+        if input_name.endswith(suffix):
+            input_name = input_name[:-len(suffix)]
+            break
+    output_path = Path(path).with_name(input_name + 'T2Map' + model + '.nii.gz')
+    nii.save(map_image, str(output_path))
+    return str(output_path)
 
 
 

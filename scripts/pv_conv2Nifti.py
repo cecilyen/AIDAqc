@@ -9,15 +9,24 @@ University Hospital Cologne
 
 
 """
-from __future__ import print_function
 
 import os
 import sys
+from pathlib import Path
+
 import numpy as np
 import nibabel as nib
 import nibabel.nifti1 as nii
 import pv_parseBruker_md_np as pB
 import P2_IDLt2_mapping as mapT2
+
+
+OUTPUT_EXTENSIONS = {
+    "NIFTI_GZ": "nii.gz",
+    "NIFTI": "nii",
+    "ANALYZE": "img",
+}
+
 
 class Bruker2Nifti:
     def __init__(self, study, expno, procno, rawfolder, procfolder, ftype='NIFTI_GZ'):
@@ -45,12 +54,13 @@ class Bruker2Nifti:
         #print("hdr:", hdr)
 
         if hdr is None or not isinstance(hdr[12], str):
-            return
+            raise ValueError("Unable to determine the NIfTI header for this scan")
 
         # read '2dseq' file
-        f_id = open(os.path.join(datadir, '2dseq'), 'rb')
-        data = np.fromfile(f_id, dtype=np.dtype(hdr[12])).reshape(hdr[1], hdr[2], hdr[3], hdr[4], order='F')
-        f_id.close()
+        with open(os.path.join(datadir, '2dseq'), 'rb') as f_id:
+            data = np.fromfile(f_id, dtype=np.dtype(hdr[12])).reshape(
+                hdr[1], hdr[2], hdr[3], hdr[4], order='F'
+            )
 
         # map to raw data range (PV6)
         if map_raw:
@@ -69,9 +79,7 @@ class Bruker2Nifti:
         nim = nii.Nifti1Image(data, None)
 
         # NIfTI header
-        #header = nim.header
-        header = nim._header
-        #print("header:"); print(header)
+        header = nim.header
         header['pixdim'] = [0.0, hdr[5], hdr[6], hdr[7], hdr[8], 0.0, 0.0, 0.0]
         #nim.setXYZUnit('mm')
         header.set_xyzt_units(xyz='mm', t=None)
@@ -93,124 +101,79 @@ class Bruker2Nifti:
         self.xml = xml
 
     def save_nifti(self, subfolder=''):
+        if not hasattr(self, 'nim'):
+            return
 
-
-        procfolder = os.path.join(self.procfolder, self.study)
-        if not os.path.isdir(procfolder):
-            os.mkdir(procfolder)
-
-        if "Localizer" in self.acqp['ACQ_protocol_name']:
-            procfolder = os.path.join(self.procfolder, self.study, "Localizer")
-        elif "DTI" in self.acqp['ACQ_protocol_name'] or "Diffusion" in self.acqp['ACQ_protocol_name']:
-            procfolder = os.path.join(self.procfolder, self.study, "DTI")
-        elif "fMRI" in self.acqp['ACQ_protocol_name']:
-            procfolder = os.path.join(self.procfolder, self.study, "fMRI")
-        elif "Turbo" in self.acqp['ACQ_protocol_name']:
-            procfolder = os.path.join(self.procfolder, self.study, "T2w")
-        elif "MSME" in self.acqp['ACQ_protocol_name']:
-            procfolder = os.path.join(self.procfolder, self.study, "T2map")
+        protocol = self.acqp.get('ACQ_protocol_name', '')
+        if "Localizer" in protocol:
+            category = "Localizer"
+        elif "DTI" in protocol or "Diffusion" in protocol:
+            category = "DTI"
+        elif "fMRI" in protocol:
+            category = "fMRI"
+        elif "Turbo" in protocol:
+            category = "T2w"
+        elif "MSME" in protocol:
+            category = "T2map"
         else:
-            procfolder = os.path.join(self.procfolder, self.study, "Others")
+            category = "Others"
 
+        procfolder = Path(self.procfolder) / self.study / category
+        if subfolder:
+            procfolder /= subfolder
+        procfolder.mkdir(parents=True, exist_ok=True)
 
-
-        if not os.path.isdir(procfolder):
-            os.mkdir(procfolder)
-
-        if self.ftype   == 'NIFTI_GZ': ext = 'nii.gz'
-        elif self.ftype == 'NIFTI':    ext = 'nii'
-        elif self.ftype == 'ANALYZE':  ext = 'img'
-        else: ext = 'nii.gz'
+        ext = OUTPUT_EXTENSIONS.get(self.ftype, 'nii.gz')
 
         fname = '.'.join([self.study, self.expno, self.procno, ext])
 
         # write Nifti file
 
-        print(os.path.join(procfolder, fname))
-        if not hasattr(self, 'nim'):
-            return
-        
-        nib.save(self.nim, os.path.join(procfolder, fname))
+        output_path = procfolder / fname
+        print(output_path)
+        nib.save(self.nim, str(output_path))
 
-        return os.path.join(procfolder, fname)
+        return str(output_path)
 
     def save_table(self, subfolder= ''):
-        procfolder = os.path.join(self.procfolder, self.study)
-        if not os.path.isdir(procfolder):
-            os.mkdir(procfolder)
+        required = ('PVM_DwEffBval', 'PVM_DwAoImages', 'PVM_DwNDiffDir', 'PVM_DwDir')
+        if not all(key in self.method for key in required):
+            return
 
-        procfolder = os.path.join(self.procfolder, self.study, subfolder)
-        if not os.path.isdir(procfolder):
-            os.mkdir(procfolder)
+        procfolder = Path(self.procfolder) / self.study / subfolder
+        procfolder.mkdir(parents=True, exist_ok=True)
 
-        #dw_bval_each = float(self.method['PVM_DwBvalEach'])
-        if 'PVM_DwEffBval' in self.method:
-            dw_eff_bval = np.array(list(map(float, self.method['PVM_DwEffBval'].split())), dtype=np.float32)
-        #print("dw_bval_each:", dw_bval_each)
-        #print("dw_eff_bval:"); print(dw_eff_bval)
+        dw_eff_bval = np.fromstring(self.method['PVM_DwEffBval'], sep=' ', dtype=np.float32)
+        dw_ao_images = int(self.method['PVM_DwAoImages'])
+        dw_n_diff_dir = int(self.method['PVM_DwNDiffDir'])
+        dw_dir = np.fromstring(self.method['PVM_DwDir'], sep=' ', dtype=np.float32)
+        if dw_dir.size != dw_n_diff_dir * 3:
+            raise ValueError("PVM_DwDir does not contain three values per direction")
+        dw_dir = dw_dir.reshape((dw_n_diff_dir, 3))
 
-        if 'PVM_DwAoImages' in self.method:
-            dw_ao_images = int(self.method['PVM_DwAoImages'])
+        n_images = dw_ao_images + dw_n_diff_dir
+        if dw_eff_bval.size < n_images:
+            raise ValueError("PVM_DwEffBval does not contain all image b-values")
 
-        if 'PVM_DwNDiffDir' in self.method:
-            dw_n_diff_dir = int(self.method['PVM_DwNDiffDir'])
-        #print("dw_ao_images:", dw_ao_images)
-        #print("dw_n_diff_dir:", dw_n_diff_dir)
+        bvals = np.zeros(n_images, dtype=np.float32)
+        bvals[dw_ao_images:] = dw_eff_bval[dw_ao_images:n_images]
+        bvecs = np.zeros((n_images, 3), dtype=np.float32)
+        bvecs[dw_ao_images:] = dw_dir
 
-            if 'PVM_DwDir' in self.method:
-                dw_dir = np.array(list(map(float, self.method['PVM_DwDir'].split())), dtype=np.float32)
-                dw_dir = dw_dir.reshape((dw_n_diff_dir, 3))
+        btable_path = procfolder / '.'.join([self.study, self.expno, self.procno, 'btable', 'txt'])
+        bvals_path = procfolder / '.'.join([self.study, self.expno, self.procno, 'bvals', 'txt'])
+        bvecs_path = procfolder / '.'.join([self.study, self.expno, self.procno, 'bvecs', 'txt'])
 
-                nd = dw_ao_images + dw_n_diff_dir
-                bvals = np.zeros(nd, dtype=np.float32)
-                dwdir = np.zeros((nd, 3), dtype=np.float32)
-
-                bvals[dw_ao_images:] = dw_eff_bval[dw_ao_images:]
-                dwdir[dw_ao_images:] = dw_dir
-
-                fname = '.'.join([self.study, self.expno, self.procno, 'btable', 'txt'])
-                print(os.path.join(procfolder, fname))
-
-                # Open btable file to write binary (windows format)
-
-                #fid = open(os.path.join(procfolder, fname), 'wb') - py 2.6
-                fid = open(os.path.join(procfolder, fname),mode='w',buffering=-1)
-
-                for i in range(nd):
-                    fid.write("%.4f" % (bvals[i],) + " %.8f %.8f %.8f" % tuple(dwdir[i]))
-                    #print("%.4f" % (bvals[i],) + " %.8f %.8f %.8f" % tuple(dwdir[i]), end="\r\n", file=fid) - py 2.6
-
-                # Close file
-                fid.close()
-
-                fname = '.'.join([self.study, self.expno, self.procno, 'bvals', 'txt'])
-                print(os.path.join(procfolder, fname))
-
-                # Open bvals file to write binary (unix format)
-                fid = open(os.path.join(procfolder, fname), mode='w', buffering=-1)
-                #fid = open(os.path.join(procfolder, fname), 'wb') - py 2.6
-
-
-                fid.write(" ".join("%.4f" % (bvals[i],) for i in range(nd)))
-                #print(" ".join("%.4f" % (bvals[i],) for i in range(nd)), end=chr(10), file=fid) - py 2.6
-
-                # Close bvals file
-                fid.close()
-
-                fname = '.'.join([self.study, self.expno, self.procno, 'bvecs', 'txt'])
-                print(os.path.join(procfolder, fname))
-
-                # Open bvecs file to write binary (unix format)
-                fid = open(os.path.join(procfolder, fname), mode='w', buffering=-1)
-                #fid = open(os.path.join(procfolder, fname), 'wb') - py 2.6
-
-                for k in range(3):
-                    fid.write(" ".join("%.8f" % (dwdir[i,k],) for i in range(nd)))
-                    #print(" ".join("%.8f" % (dwdir[i,k],) for i in range(nd)), end=chr(10), file=fid)- py 2.6
-
-                # Close bvecs file
-                fid.close()
-
+        for output_path in (btable_path, bvals_path, bvecs_path):
+            print(output_path)
+        np.savetxt(
+            btable_path,
+            np.column_stack((bvals, bvecs)),
+            fmt=('%.4f', '%.8f', '%.8f', '%.8f'),
+        )
+        np.savetxt(bvals_path, bvals[np.newaxis, :], fmt='%.4f')
+        np.savetxt(bvecs_path, bvecs.T, fmt='%.8f')
+        return
 
 if __name__ == "__main__":
     import argparse
@@ -218,7 +181,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert ParaVision to NIfTI')
 
     requiredNamed = parser.add_argument_group('Required named arguments')
-    requiredNamed.add_argument('-i','--input_folder', help='raw data folder')
+    requiredNamed.add_argument('-i', '--input_folder', required=True, help='raw data folder')
     # parser.add_argument('-o','--output_folder', help='output data folder')
     # parser.add_argument('study', help='study name')
     # parser.add_argument('expno', help='experiment number')
@@ -237,47 +200,46 @@ if __name__ == "__main__":
     parser.add_argument('-t', '--table', action='store_true', help='save b-values and diffusion directions')
     args = parser.parse_args()
 
-    input_folder = None
-    # raw data folder
-    if args.input_folder is not None:
-        input_folder = args.input_folder
-    if not os.path.isdir(input_folder):
+    input_folder = Path(args.input_folder)
+    if not input_folder.is_dir():
         sys.exit("Error: '%s' is not an existing directory." % (input_folder,))
 
+    scan_names = [entry.name for entry in input_folder.iterdir() if entry.name.isdigit()]
 
-
-    list = os.listdir(input_folder)
-    listOfScans = [s for s in list if s.isdigit()]
-
-    if len(listOfScans) == 0:
+    if not scan_names:
         sys.exit("Error: '%s' contains no numbered scans." % (input_folder,))
 
-    print('Start to process '+str(len(listOfScans))+' scans...')
-    procno ='1'
-    study=input_folder.split('/')[len(input_folder.split('/'))-1]
+    print('Start to process ' + str(len(scan_names)) + ' scans...')
+    procno = '1'
+    study = input_folder.name
     print(study)
-    img = []
-    for expno in np.sort(listOfScans):
-        path = os.path.join(input_folder, expno, 'pdata', procno)
-        if not os.path.isdir(path):
+    img = None
+    res_path = None
+    for expno in sorted(scan_names, key=int):
+        path = input_folder / expno / 'pdata' / procno
+        if not path.is_dir():
             sys.exit("Error: '%s' is not an existing directory." % (path,))
 
-        if os.path.exists(os.path.join(path,'2dseq')):
+        if (path / '2dseq').exists():
 
-            img = Bruker2Nifti(study, expno, procno, os.path.split(input_folder)[0], input_folder, ftype='NIFTI_GZ')
+            img = Bruker2Nifti(
+                study, expno, procno, str(input_folder.parent), str(input_folder),
+                ftype='NIFTI_GZ'
+            )
             img.read_2dseq(map_raw=args.map_raw, pv6=args.pv6)
-            resPath = img.save_nifti()
-            if resPath is None: continue
+            res_path = img.save_nifti()
+            if res_path is None:
+                continue
 
             if 'VisuAcqEchoTime' in img.visu_pars:
 
                 echoTime = img.visu_pars['VisuAcqEchoTime']
                 echoTime = np.fromstring(echoTime, dtype=float, sep=' ')
                 if len(echoTime) > 3:
-                    mapT2.getT2mapping(resPath,args.model,args.upLim,args.snrLim,args.snrMethod,echoTime)
-    if resPath is not None:
-        pathlog = os.path.dirname(os.path.dirname(resPath))
-        pathlog = os.path.join(pathlog, 'data.log')
-        logfile = open(pathlog, 'w')
-        logfile.write(img.subject['coilname'])
-        logfile.close()
+                    mapT2.getT2mapping(
+                        res_path, args.model, args.upLim, args.snrLim,
+                        args.snrMethod, echoTime
+                    )
+    if res_path is not None and img is not None:
+        pathlog = Path(res_path).parent.parent / 'data.log'
+        pathlog.write_text(img.subject['coilname'])

@@ -18,6 +18,7 @@ from sklearn.svm import OneClassSVM
 MODEL_COLUMNS = ["One_class_SVM", "EllipticEnvelope", "IsolationForest", "LocalOutlierFactor"]
 LOW_OUTLIER_METRICS = {"SNR Chang", "tSNR (Averaged Brain ROI)", "SNR Normal"}
 HIGH_OUTLIER_METRICS = {"Displacement factor (std of Mutual information)"}
+QC_METRIC_COLUMNS = LOW_OUTLIER_METRICS | HIGH_OUTLIER_METRICS
 
 
 # =========================
@@ -40,8 +41,16 @@ def mutualInfo(Im1: np.ndarray, Im2: np.ndarray, bins: int = 20) -> float:
     """
     Compute mutual information (in nats) between two images using a vectorized 2D histogram.
     """
-    x = Im1.ravel()
-    y = Im2.ravel()
+    x = np.asarray(Im1, dtype=float).ravel()
+    y = np.asarray(Im2, dtype=float).ravel()
+    if x.size != y.size:
+        raise ValueError("Mutual information inputs must have the same size")
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size == 0:
+        return 0.0
 
     x_min, x_max = np.min(x), np.max(x)
     y_min, y_max = np.min(y), np.max(y)
@@ -107,9 +116,11 @@ def GhostCheck(input_file, pe_axis: int = 0) -> float:
     """
     # --- Load & reduce ---
     img = input_file.get_fdata()
-    if img.ndim > 3:
+    if img.ndim < 2 or pe_axis not in (0, 1):
+        return float("nan")
+    while img.ndim > 3:
         img = img.mean(axis=-1)
-    elif img.ndim < 3:
+    if img.ndim == 2:
         img = img[:, :, np.newaxis]
     _, _, Z = img.shape
     sl = img[:, :, Z // 2]
@@ -136,9 +147,15 @@ def GhostCheck(input_file, pe_axis: int = 0) -> float:
     n2_mask = n2_mask + 2 * (1 - n2_mask - mask)
 
     # Step 5: signal is the entire foreground image
-    ghost = np.mean(sl[n2_mask == 1]) - np.mean(sl[n2_mask == 2])
-    signal = np.median(sl[n2_mask == 0])
-    if not np.isfinite(signal) or signal == 0:
+    ghost_values = sl[n2_mask == 1]
+    background_values = sl[n2_mask == 2]
+    signal_values = sl[n2_mask == 0]
+    if not ghost_values.size or not background_values.size or not signal_values.size:
+        return float("nan")
+
+    ghost = np.mean(ghost_values) - np.mean(background_values)
+    signal = np.median(signal_values)
+    if not np.isfinite(ghost) or not np.isfinite(signal) or signal == 0:
         return float("nan")
     return float(ghost / signal)
 
@@ -148,6 +165,14 @@ def GhostCheck(input_file, pe_axis: int = 0) -> float:
 def ResCalculator(input_file):
     """Return voxel size (pixdim[1:4])."""
     return input_file.header["pixdim"][1:4]
+
+
+def _safe_db_ratio(signal: float, noise: float) -> float:
+    """Return 20*log10(signal/noise), or NaN for invalid measurements."""
+    if not np.isfinite(signal) or not np.isfinite(noise) or signal <= 0 or noise <= 0:
+        return float("nan")
+    value = 20 * np.log10(signal / noise)
+    return float(value) if np.isfinite(value) else float("nan")
 
 
 def load_feature_tables(path: str):
@@ -188,16 +213,14 @@ def iqr_outlier_index(series: pd.Series, high_is_bad: bool) -> pd.Series:
 # =========================
 def snr_calculator_chang(input_file) -> float:
     """Compute SNR using Chang’s estimator on central slices / directions."""
-    IM = np.asanyarray(input_file.dataobj)
-    img = np.squeeze(IM.astype("float64"))
+    image = np.squeeze(np.asanyarray(input_file.dataobj).astype("float64"))
 
-    if img.ndim < 3 or img.mean() == 0:
+    if image.ndim < 3 or not np.isfinite(image).any() or np.nanmean(image) == 0:
         return np.nan
 
-    ns = img.shape[2]
-    if img.ndim > 3:
-        n_dir = img.shape[-1]
-        fff = 0 if n_dir < 10 else 5
+    ns = image.shape[2]
+    n_dir = image.shape[-1] if image.ndim > 3 else 0
+    direction_start = 0 if n_dir < 10 else 5
 
     if ns > 4:
         sl_lo = int(np.floor(ns / 2) - 2)
@@ -205,29 +228,28 @@ def snr_calculator_chang(input_file) -> float:
     else:
         sl_lo, sl_hi = 0, ns
 
-    vals = []
-    if img.ndim == 3:
+    values = []
+    if image.ndim == 3:
         for sl in range(sl_lo, sl_hi):
-            slc = img[:, :, sl]
+            slc = image[:, :, sl]
             try:
                 _, est_std, _ = ch.calcSNR(slc, 0, 1)
             except ValueError:
                 est_std = np.nan
-            vals.append(20 * np.log10(np.mean(slc) / est_std))
+            values.append(_safe_db_ratio(np.nanmean(slc), est_std))
     else:
-        n_dir = img.shape[-1]
         for sl in range(sl_lo, sl_hi):
-            for bb in range(fff, n_dir - 1):
-                slc = img[:, :, sl, bb]
+            for bb in range(direction_start, max(direction_start, n_dir - 1)):
+                slc = image[:, :, sl, bb]
                 try:
                     _, est_std, _ = ch.calcSNR(slc, 0, 1)
                 except ValueError:
                     est_std = np.nan
-                vals.append(20 * np.log10(np.mean(slc) / est_std))
+                values.append(_safe_db_ratio(np.nanmean(slc), est_std))
 
-    vals = np.asarray(vals)
-    mask = np.isfinite(vals)
-    return float(np.mean(vals[mask])) if mask.any() else float("nan")
+    values = np.asarray(values)
+    finite = np.isfinite(values)
+    return float(np.mean(values[finite])) if finite.any() else float("nan")
 
 
 # =========================
@@ -249,51 +271,40 @@ def sphere(shape, radius: int, position) -> np.ndarray:
 
 def snr_calculator_normal(input_file) -> float:
     """Compute conventional SNR using central spherical ROI and corner noise."""
-    IM = np.asanyarray(input_file.dataobj)
-    img = np.squeeze(IM.astype("float64"))
+    image = np.squeeze(np.asanyarray(input_file.dataobj).astype("float64"))
+    if image.ndim == 2:
+        image = np.repeat(image[:, :, np.newaxis], 10, axis=2)
+    elif image.ndim == 4:
+        image = image[:, :, :, 0]
+    if image.ndim != 3:
+        return float("nan")
 
-    if img.ndim < 3:
-        img = np.tile(img[:, :, np.newaxis], (1, 1, 10))
-
-    Data = img
-    S = np.squeeze(Data).shape
-
-    if len(S) == 3:
-        img = np.squeeze(Data)
-    elif len(S) == 4:
-        img = np.squeeze(Data[:, :, :, 0])
-
-    S = np.squeeze(img).shape
+    shape = image.shape
 
     # Spherical mask around center-of-mass
-    center = ndimage.center_of_mass(img)
+    center = ndimage.center_of_mass(image)
     if not np.all(np.isfinite(center)):
         return float("nan")
-    COM = [int(i) for i in center]
-    r = int(np.floor(0.10 * np.mean(S)))
-    r = min(r, S[2])
-    Mask = sphere(S, r, COM)
-    if not np.any(Mask):
+    center = [int(i) for i in center]
+    radius = min(int(np.floor(0.10 * np.mean(shape))), shape[2])
+    mask = sphere(shape, radius, center)
+    if not np.any(mask):
         return float("nan")
-    signal_val = float(img[Mask].mean())
+    signal_value = float(image[mask].mean())
 
     # 8-corner noise regions (vectorized)
-    x = int(np.ceil(S[0] * 0.15))
-    y = int(np.ceil(S[1] * 0.15))
-    z = int(np.ceil(S[2] * 0.15))
+    x = int(np.ceil(shape[0] * 0.15))
+    y = int(np.ceil(shape[1] * 0.15))
+    z = int(np.ceil(shape[2] * 0.15))
     if x == 0 or y == 0 or z == 0:
         return float("nan")
 
     blocks = (
-        img[:x, :y, :z], img[:x, -y:, :z], img[-x:, :y, :z], img[-x:, -y:, :z],
-        img[:x, :y, -z:], img[:x, -y:, -z:], img[-x:, :y, -z:], img[-x:, -y:, -z:]
+        image[:x, :y, :z], image[:x, -y:, :z], image[-x:, :y, :z], image[-x:, -y:, :z],
+        image[:x, :y, -z:], image[:x, -y:, -z:], image[-x:, :y, -z:], image[-x:, -y:, -z:]
     )
     noise_std = float(np.std(np.concatenate([b.ravel() for b in blocks])))
-    if noise_std == 0:
-        return float("nan")
-
-    snr = 20 * np.log10(signal_val / noise_std)
-    return snr if np.isfinite(snr) else float("nan")
+    return _safe_db_ratio(signal_value, noise_std)
 
 
 # =========================
@@ -301,26 +312,30 @@ def snr_calculator_normal(input_file) -> float:
 # =========================
 def tsnr_calculator(input_file) -> float:
     """Compute temporal SNR (tSNR) with initial burn-in (10 volumes if available)."""
-    IM = np.asanyarray(input_file.dataobj)
-    if IM.ndim == 3:
-        IM = IM.reshape(IM.shape[0], IM.shape[1], 1, IM.shape[2])  # (H,W,1,T)
+    image = np.asanyarray(input_file.dataobj)
+    if image.ndim == 3:
+        image = image.reshape(image.shape[0], image.shape[1], 1, image.shape[2])
+    if image.ndim != 4 or image.shape[-1] == 0:
+        return float("nan")
 
-    img = IM.astype("float64")
-    fff = 0 if img.shape[-1] < 10 else 10
+    image = image.astype("float64")
+    burn_in = 10 if image.shape[-1] > 10 else 0
+    signal = image[:, :, :, burn_in:]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tsnr_map = 20 * np.log10(signal.mean(axis=-1) / signal.std(axis=-1))
 
-    sig = img[:, :, :, fff:]
-    tsnr_map = 20 * np.log10(sig.mean(axis=-1) / (sig.std(axis=-1) + 1e-12))  # epsilon for stability
-
-    img_avg = img.mean(axis=-1)
-    center = ndimage.center_of_mass(img_avg)
+    image_average = image.mean(axis=-1)
+    center = ndimage.center_of_mass(image_average)
     if not np.all(np.isfinite(center)):
         return float("nan")
-    COM = [int(i) for i in center]
-    r = int(np.floor(0.10 * np.mean(img.shape[:2])))
-    Mask = sphere(img.shape[:3], r, COM)
-    if not np.any(Mask):
+    center = [int(i) for i in center]
+    radius = int(np.floor(0.10 * np.mean(image.shape[:2])))
+    mask = sphere(image.shape[:3], radius, center)
+    values = tsnr_map[mask]
+    values = values[np.isfinite(values)]
+    if not values.size:
         return float("nan")
-    return float(np.mean(tsnr_map[Mask]))
+    return float(np.mean(values))
 
 
 # Legacy names kept for downstream scripts and older notebooks.
@@ -337,13 +352,17 @@ def Ismotion(input_file):
     Basic motion metric using mutual information change across time
     on the brightest slice (by mean intensity).
     """
-    IM = np.asanyarray(input_file.dataobj)
-    if IM.ndim == 3:
-        IM = IM.reshape(IM.shape[0], IM.shape[1], 1, IM.shape[2])  # (H,W,1,T)
+    image = np.asanyarray(input_file.dataobj)
+    if image.ndim == 3:
+        image = image.reshape(image.shape[0], image.shape[1], 1, image.shape[2])
+    if image.ndim != 4:
+        return np.asarray([]), str([0, 0]), 0.0, 0.0
 
-    img = IM.astype("float64")
-    fff = 0 if img.shape[-1] < 11 else 10
-    sig = img[:, :, :, fff:]
+    image = image.astype("float64")
+    burn_in = 10 if image.shape[-1] > 10 else 0
+    sig = image[:, :, :, burn_in:]
+    if sig.shape[-1] < 2:
+        return np.asarray([]), str([0, 0]), 0.0, 0.0
 
     # Choose slice with highest mean intensity across time
     temp_mean = sig.mean(axis=(0, 1, 3))
@@ -380,78 +399,70 @@ def QCPlot(Path: str) -> None:
 
     hh = 1
     for df, N in feature_tables:
-        cols = list(df.columns)
-        if cols:
-            cols.pop(0)
+        for C in (column for column in df.columns if column in QC_METRIC_COLUMNS):
+            data = pd.to_numeric(df[C], errors="coerce").to_numpy()
+            data = data[np.isfinite(data)]
+            n = data.size
+            if n < 2:
+                continue
 
-        for C in cols:
-            if C in (
-                "SNR Chang",
-                "tSNR (Averaged Brain ROI)",
-                "SNR Normal",
-                "Displacement factor (std of Mutual information)",
-            ):
-                data = pd.to_numeric(df[C], errors="coerce").to_numpy()
-                data = data[np.isfinite(data)]
-                n = data.size
-                if n < 2:
-                    continue
+            q75, q25 = np.percentile(data, [75, 25])
+            iqr = q75 - q25
+            rng = float(data.max() - data.min())
 
-                q75, q25 = np.percentile(data, [75, 25])
-                iqr = q75 - q25
-                rng = float(data.max() - data.min())
+            if rng <= 0 or iqr <= 0:
+                B = 1
+            else:
+                h = 2 * iqr / (n ** (1 / 3))
+                B = 1 if (not np.isfinite(h) or h <= 0) else int(np.ceil(rng / h))
 
-                if rng <= 0 or iqr <= 0:
-                    B = 1
+            nbins = max(1, B * 7)
+            XX = min(22, max(1, B) * 5)
+
+            plt.figure(hh, figsize=(9, 5), dpi=300)
+            ax2 = plt.subplot(1, 1, 1, label="hist")
+            y, _, bars = plt.hist(data, bins=nbins, histtype="bar", edgecolor="white")
+
+            plt.xlabel(f"{N}: {C} [a.u.]", fontdict=label_font)
+            plt.ylabel("Frequency", fontdict=label_font)
+            ax2.spines["right"].set_visible(False)
+            ax2.spines["top"].set_visible(False)
+            plt.locator_params(axis="x", nbins=XX)
+            ax2.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+            if iqr > 0:
+                if C == "Displacement factor (std of Mutual information)":
+                    limit = q75 + 1.5 * iqr
+                    label = "Q3 + 1.5*IQ"
+                    is_outlier = lambda bar: bar.get_x() > limit
                 else:
-                    h = 2 * iqr / (n ** (1 / 3))
-                    B = 1 if (not np.isfinite(h) or h <= 0) else int(np.ceil(rng / h))
+                    limit = q25 - 1.5 * iqr
+                    label = "Q1 - 1.5*IQ"
+                    is_outlier = lambda bar: bar.get_x() < limit
 
-                nbins = max(1, B * 7)
-                XX = min(22, max(1, B) * 5)
+                if len(y):
+                    plt.text(limit, 2 * max(y) / 3, label, color="grey", fontdict=label_font)
+                for bar in bars:
+                    if is_outlier(bar):
+                        bar.set_facecolor("red")
+                plt.axvline(limit, color="grey", linestyle="--")
 
-                plt.figure(hh, figsize=(9, 5), dpi=300)
-                ax2 = plt.subplot(1, 1, 1, label="hist")
-                y, _, bars = plt.hist(data, bins=nbins, histtype="bar", edgecolor="white")
+            plt.suptitle(f"{N}: {C}", fontdict=title_font)
+            legend = plt.legend(
+                handles=[mpatches.Patch(color="tab:blue", label="Keep"),
+                         mpatches.Patch(color="red", label="Discard")],
+                fontsize=8,
+            )
+            for text in legend.get_texts():
+                text.set_fontfamily("serif")
+                text.set_fontsize(8)
 
-                plt.xlabel(f"{N}: {C} [a.u.]", fontdict=label_font)
-                plt.ylabel("Frequency", fontdict=label_font)
-                ax2.spines["right"].set_visible(False)
-                ax2.spines["top"].set_visible(False)
-                plt.locator_params(axis="x", nbins=XX)
-                ax2.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax2.xaxis.set_tick_params(labelsize=8)
+            ax2.yaxis.set_tick_params(labelsize=8)
 
-                if iqr > 0:
-                    if C == "Displacement factor (std of Mutual information)":
-                        ll = q75 + 1.5 * iqr
-                        annotate = ("Q3 + 1.5*IQ", lambda bar: bar.get_x() > ll)
-                    else:
-                        ll = q25 - 1.5 * iqr
-                        annotate = ("Q1 - 1.5*IQ", lambda bar: bar.get_x() < ll)
-
-                    if len(y):
-                        plt.text(ll, 2 * max(y) / 3, annotate[0], color="grey", fontdict=label_font)
-                    for bar in bars:
-                        if annotate[1](bar):
-                            bar.set_facecolor("red")
-                    plt.axvline(ll, color="grey", linestyle="--")
-
-                plt.suptitle(f"{N}: {C}", fontdict=title_font)
-                legend = plt.legend(
-                    handles=[mpatches.Patch(color="tab:blue", label="Keep"),
-                             mpatches.Patch(color="red", label="Discard")],
-                    fontsize=8,
-                )
-                for t in legend.get_texts():
-                    t.set_fontfamily("serif")
-                    t.set_fontsize(8)
-
-                ax2.xaxis.set_tick_params(labelsize=8)
-                ax2.yaxis.set_tick_params(labelsize=8)
-
-                out = os.path.join(qc_fig_path, f"{C}{N}.png")
-                plt.savefig(out, dpi=300)
-                plt.close()
+            out = os.path.join(qc_fig_path, f"{C}{N}.png")
+            plt.savefig(out, dpi=300)
+            plt.close()
 
         hh += 1
 
@@ -459,26 +470,22 @@ def QCPlot(Path: str) -> None:
     plt.figure(hh, figsize=(9, 5), dpi=300)
     rr = 1
     for df, N in feature_tables:
-        cols = list(df.columns)
-        if cols:
-            cols.pop(0)
-        for C in cols:
-            if C in ("SpatRx", "SpatRy", "SpatRz"):
-                vals = pd.to_numeric(df[C], errors="coerce").to_numpy()
-                vals = vals[np.isfinite(vals)]
-                if vals.size == 0:
-                    continue
-                labels, counts = np.unique(vals, return_counts=True)
-                labels2 = [f"{l:.3f} mm" for l in labels]
+        for C in (column for column in df.columns if column in {"SpatRx", "SpatRy", "SpatRz"}):
+            vals = pd.to_numeric(df[C], errors="coerce").to_numpy()
+            vals = vals[np.isfinite(vals)]
+            if vals.size == 0:
+                continue
+            labels, counts = np.unique(vals, return_counts=True)
+            labels2 = [f"{l:.3f} mm" for l in labels]
 
-                ax1 = plt.subplot(len(feature_tables), 3, rr)
-                ax1.pie(counts, labels=labels2, autopct="%1.0f%%", startangle=180)
-                ax1.axis("equal")
-                ax1.set_title(f"{N}:{C}", fontdict=title_font)
-                plt.suptitle("Resolution homogeneity between data", weight="bold")
-                ax1.xaxis.set_tick_params(labelsize=8)
-                ax1.yaxis.set_tick_params(labelsize=8)
-                rr += 1
+            ax1 = plt.subplot(len(feature_tables), 3, rr)
+            ax1.pie(counts, labels=labels2, autopct="%1.0f%%", startangle=180)
+            ax1.axis("equal")
+            ax1.set_title(f"{N}:{C}", fontdict=title_font)
+            plt.suptitle("Resolution homogeneity between data", weight="bold")
+            ax1.xaxis.set_tick_params(labelsize=8)
+            ax1.yaxis.set_tick_params(labelsize=8)
+            rr += 1
 
     out = os.path.join(qc_fig_path, "Spatial_Resolution.png")
     plt.savefig(out, dpi=300)
@@ -488,6 +495,18 @@ def QCPlot(Path: str) -> None:
 # =========================
 # ML voting
 # =========================
+def _predict_or_inliers(model, features: pd.DataFrame) -> np.ndarray:
+    """Fit one detector, falling back to inliers for unsuitable small datasets."""
+    predictions = np.ones(len(features), dtype=int)
+    if len(features) < 2:
+        return predictions
+
+    try:
+        return model.fit_predict(features)
+    except (ValueError, RuntimeError, np.linalg.LinAlgError):
+        return predictions
+
+
 def ML(Path: str, format_type: str):
     """
     Run multiple outlier detectors and return per-row predictions for each *_features_*.csv.
@@ -543,43 +562,23 @@ def ML(Path: str, format_type: str):
         # Scale features
         X = pd.DataFrame(StandardScaler().fit_transform(X), index=X.index)
 
-        # Default predictions = inliers (+1)
-        pred_svm = np.ones(n_samples, dtype=int)
-        pred_ell = np.ones(n_samples, dtype=int)
-        pred_iso = np.ones(n_samples, dtype=int)
-        pred_lof = np.ones(n_samples, dtype=int)
-
-        # Fit models with guards
-        try:
-            if n_samples >= 2:
-                pred_svm = OneClassSVM(gamma="auto", kernel="poly", nu=0.05, shrinking=False).fit(X).predict(X)
-        except Exception:
-            pass
-        try:
-            if n_samples >= 2:
-                pred_ell = EllipticEnvelope(contamination=0.025, random_state=1).fit_predict(X)
-        except Exception:
-            pass
-        try:
-            if n_samples >= 2:
-                pred_iso = IsolationForest(
-                    n_estimators=100, max_samples="auto", contamination=0.05,
-                    max_features=1.0, bootstrap=False, n_jobs=-1, random_state=1
-                ).fit_predict(X)
-        except Exception:
-            pass
-        try:
-            if n_samples >= 2:
-                n_neighbors = max(2, min(20, n_samples - 1))
-                pred_lof = LocalOutlierFactor(
-                    n_neighbors=n_neighbors, algorithm="auto", metric="minkowski",
-                    contamination=0.04, novelty=False, n_jobs=-1
-                ).fit_predict(X)
-        except Exception:
-            pass
+        n_neighbors = max(2, min(20, n_samples - 1))
+        models = (
+            OneClassSVM(gamma="auto", kernel="poly", nu=0.05, shrinking=False),
+            EllipticEnvelope(contamination=0.025, random_state=1),
+            IsolationForest(
+                n_estimators=100, max_samples="auto", contamination=0.05,
+                max_features=1.0, bootstrap=False, n_jobs=-1, random_state=1
+            ),
+            LocalOutlierFactor(
+                n_neighbors=n_neighbors, algorithm="auto", metric="minkowski",
+                contamination=0.04, novelty=False, n_jobs=-1
+            ),
+        )
+        predictions = [_predict_or_inliers(model, X) for model in models]
 
         df = pd.DataFrame(
-            np.vstack([pred_svm, pred_ell, pred_iso, pred_lof]).T,
+            np.vstack(predictions).T,
             columns=MODEL_COLUMNS,
         )
 
@@ -624,10 +623,10 @@ def QCtable(Path: str, format_type: str) -> None:
     algs["Voting outliers (from 5)"] = algs[vote_cols].sum(axis=1)
     algs = algs[algs["Voting outliers (from 5)"] >= 1]
 
+    metadata_cols = ["Paths", "corresponding_img", "sequence_type"]
     if format_type == "raw":
-        keep_cols = ["Paths", "sequence_name", "corresponding_img", "sequence_type"] + vote_cols
-    else:
-        keep_cols = ["Paths", "corresponding_img", "sequence_type"] + vote_cols
+        metadata_cols.insert(1, "sequence_name")
+    keep_cols = [column for column in metadata_cols + vote_cols if column in algs]
     algs = algs[keep_cols]
 
     final_result = os.path.join(Path, "votings.csv")

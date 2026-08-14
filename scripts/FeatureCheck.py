@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -72,6 +71,27 @@ def calculate_snr_features(input_file: nib.Nifti1Image) -> Tuple[float, float]:
     return snr_chang, snr_normal
 
 
+def calculate_sequence_features(
+    input_file: nib.Nifti1Image, seq_type: str
+) -> Dict[str, float]:
+    """Calculate the metrics that are specific to one sequence type."""
+    features: Dict[str, float] = {}
+
+    if seq_type in {"anat", "diff"}:
+        snr_chang, snr_normal = calculate_snr_features(input_file)
+        features["SNR Chang"] = snr_chang
+        features["SNR Normal"] = snr_normal
+
+    if seq_type in {"diff", "func"}:
+        if seq_type == "func":
+            features["tSNR (Averaged Brain ROI)"] = tsnr_calculator(input_file)
+        features["Displacement factor (std of Mutual information)"] = (
+            calculate_motion_displacement(input_file)
+        )
+
+    return features
+
+
 def calculate_motion_displacement(input_file: nib.Nifti1Image) -> float:
     """Return the motion displacement metric written to feature CSVs."""
     return Ismotion(input_file)[3]
@@ -79,36 +99,35 @@ def calculate_motion_displacement(input_file: nib.Nifti1Image) -> float:
 
 def load_raw_bruker_data(file_path: str) -> Tuple[Optional[nib.Nifti1Image], Optional[str]]:
     """Load raw Bruker data and return NIfTI image and sequence key."""
-    path_parts = Path(file_path).parts
-    
-    procno = '1'
-    expno = path_parts[-1]
-    study = path_parts[-2]
-    raw_folder = os.sep.join(path_parts[:-2])
-    proc_folder = os.path.join(raw_folder, 'proc_data')
+    scan_path = Path(file_path)
+    procno = "1"
+    expno = scan_path.name
+    study = scan_path.parent.name
+    raw_folder = scan_path.parent.parent
+    proc_folder = raw_folder / "proc_data"
     
     # Check for required parameter files
-    visu_pars = os.path.join(file_path, 'pdata', '1', 'visu_pars')
-    acqp_path = os.path.join(file_path, 'acqp')
+    visu_pars = scan_path / "pdata" / "1" / "visu_pars"
+    acqp_path = scan_path / "acqp"
     
-    if not (os.path.isfile(visu_pars) and os.path.isfile(acqp_path)):
+    if not (visu_pars.is_file() and acqp_path.is_file()):
         raise FileNotFoundError("Missing visu_pars or acqp file")
     
     # Load Bruker data
-    pv = pr.Bruker2Nifti(study, expno, procno, raw_folder, proc_folder, ftype='NIFTI_GZ')
+    pv = pr.Bruker2Nifti(
+        study, expno, procno, str(raw_folder), str(proc_folder), ftype="NIFTI_GZ"
+    )
     pv.read_2dseq(map_raw=False, pv6=False)
     input_file = nib.squeeze_image(pv.nim)
     
     # Create proper affine matrix for nilearn
-    affine = np.eye(4)
-    pixdim = pv.nim.header.get('pixdim')
-    for i in range(4):
-        affine[i, i] = pixdim[i + 1]
+    pixdim = pv.nim.header.get("pixdim")
+    affine = np.diag([pixdim[1], pixdim[2], pixdim[3], 1.0])
     
     input_file = nib.Nifti1Image(input_file.get_fdata(), affine=affine, dtype=np.int32)
     
     # Get sequence information
-    scan_info = par.read_param_file(acqp_path)
+    scan_info = par.read_param_file(str(acqp_path))
     method_name = scan_info[1]["ACQ_method"].upper()
     scan_name = scan_info[1]["ACQ_scan_name"].upper()
     sequence_key = method_name + scan_name
@@ -136,20 +155,24 @@ def process_single_file(file_path: str,
             sequence_key = None
         
         # Create inspection image
-        qc_path = os.path.join(output_path, "manual_slice_inspection")
-        os.makedirs(qc_path, exist_ok=True)
+        qc_path = Path(output_path) / "manual_slice_inspection"
+        qc_path.mkdir(exist_ok=True)
         
         path_obj = Path(file_path)
         if is_raw:
-            img_name = path_obj.parts[-2]
+            img_name = path_obj.parent.name
         else:
-            img_name = f"{path_obj.parts[-2]}_{path_obj.name}"
+            file_name = path_obj.name
+            if file_name.endswith(".nii.gz"):
+                file_name = file_name[:-7]
+            elif file_name.endswith(".nii"):
+                file_name = file_name[:-4]
+            img_name = f"{path_obj.parent.name}_{file_name}"
         
         full_img_name = f"{seq_type}_{img_name}_{file_index}.png"
-        full_img_name = full_img_name.replace('.nii', '').replace('.gz', '')
         
-        svg_path = os.path.join(qc_path, full_img_name)
-        create_inspection_image(input_file, svg_path, full_img_name)
+        image_path = qc_path / full_img_name
+        create_inspection_image(input_file, str(image_path), full_img_name)
         
         # Calculate common features
         spatial_res, ghosting = calculate_common_features(input_file)
@@ -165,26 +188,11 @@ def process_single_file(file_path: str,
         if sequence_key:
             row['sequence name'] = sequence_key
         
-        # Calculate sequence-specific features
-        if seq_type == 'anat':
-            snr_chang, snr_normal = calculate_snr_features(input_file)
-            row['SNR Chang'] = snr_chang
-            row['SNR Normal'] = snr_normal
-            
-        elif seq_type == 'diff':
-            snr_chang, snr_normal = calculate_snr_features(input_file)
-            row['SNR Chang'] = snr_chang
-            row['SNR Normal'] = snr_normal
-            row['Displacement factor (std of Mutual information)'] = calculate_motion_displacement(input_file)
-            
-        elif seq_type == 'func':
-            tsnr = tsnr_calculator(input_file)
-            row['tSNR (Averaged Brain ROI)'] = tsnr
-            row['Displacement factor (std of Mutual information)'] = calculate_motion_displacement(input_file)
+        row.update(calculate_sequence_features(input_file, seq_type))
         
         return row, None
         
-    except (ValueError, SystemError, KeyError, FileNotFoundError, 
+    except (ValueError, OSError, SystemError, KeyError,
             nib.loadsave.ImageFileError) as e:
         error_msg = f"{file_path}_{type(e).__name__}"
         print(f"{type(e).__name__}: {file_path}")
@@ -223,10 +231,7 @@ def save_results(rows: List[Dict[str, object]],
     """Save feature rows to a CSV file."""
     include_sequence_name = any('sequence name' in row for row in rows)
     df = pd.DataFrame(rows, columns=output_columns(seq_type, include_sequence_name))
-    output_file = os.path.join(
-        output_path,
-        FEATURE_FILE_TEMPLATE.format(seq_type=seq_type),
-    )
+    output_file = Path(output_path) / FEATURE_FILE_TEMPLATE.format(seq_type=seq_type)
     df.to_csv(output_file, index=False)
 
 
@@ -252,7 +257,8 @@ def process_features(path: str, is_raw: bool = False) -> None:
         if addresses_df.empty:
             continue
         
-        file_list = addresses_df.iloc[:, 0].tolist()
+        address_column = "FileAddress" if "FileAddress" in addresses_df else addresses_df.columns[0]
+        file_list = addresses_df[address_column].dropna().astype(str).tolist()
         
         # Process files
         rows, errors = process_sequence_type(
@@ -271,7 +277,7 @@ def process_features(path: str, is_raw: bool = False) -> None:
     # Save error list
     if all_errors:
         df_errors = pd.DataFrame({'ErrorData': all_errors})
-        error_file = os.path.join(path, "CanNotProcessTheseFiles.csv")
+        error_file = Path(path) / "CanNotProcessTheseFiles.csv"
         df_errors.to_csv(error_file, index=False)
         print(f"Error list saved to: {error_file}")
     

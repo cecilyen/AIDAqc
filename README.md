@@ -25,8 +25,9 @@ Compared with the original upstream repository, this fork changes the implementa
 - **Container and docs cleanup:** the Dockerfile now uses a single Conda-based stage, fixes the Conda environment path, and the README Docker commands use valid build and volume syntax.
 - **Dependency list cleanup:** `requirements.txt` removes unused/commented entries from the original list and adds the local `dict2xml` dependency used by Bruker metadata parsing.
 - **Follow-up cleanup:** the feature path now shares sequence-specific metric logic, address CSVs use an explicit `FileAddress` column, raw/NIfTI I/O uses safer `Path` handling, SNR/KDE helpers bound their working set, and Bruker diffusion tables are written with consistent rows and columns.
+- **OneDrive compatibility:** the complete checkout can be audited for Microsoft's public sync restrictions with `scripts/check_onedrive_compatibility.py`; operational limits and NIH tenant-policy boundaries are documented in [docs/ONEDRIVE.md](docs/ONEDRIVE.md).
 
-Validation performed for this fork has covered Python 3.6 grammar/compile checks and lightweight XML helper smoke tests. Full MRI dataset validation and container image builds have not yet been rerun; the isolated validation runtime also does not include the scientific dependencies required for the full pipeline.
+Validation performed for this fork has covered Python 3.6 grammar/compile checks, lightweight XML helper smoke tests, and a complete OneDrive compatibility audit. Full MRI dataset validation and container image builds have not yet been rerun; the isolated validation runtime also does not include the scientific dependencies required for the full pipeline.
 
 <img align="left" src="https://github.com/Aswendt-Lab/AIDAqc/blob/main/docs/AIDAqc_workflow.png">
 
@@ -41,6 +42,17 @@ Download the repository, install Python 3.6 with Conda, then import the AIDAqc C
 Main function: *ParsingData*
 
 See the full manual [here](https://github.com/Aswendt-Lab/AIDAqc/blob/main/docs/AIDAqc_v2_1.pdf).
+
+For work/school OneDrive checkouts, run the compatibility audit before and after
+large file changes:
+
+```powershell
+uv run python -OO scripts/check_onedrive_compatibility.py .
+```
+
+See [docs/ONEDRIVE.md](docs/ONEDRIVE.md) for the checked limits, migration
+location, and the boundary between public Microsoft restrictions and
+tenant-specific NIH controls.
 
 <h3>Docker/Apptainer Usage</h3>
 
